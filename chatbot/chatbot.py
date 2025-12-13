@@ -31,27 +31,30 @@ graph.add_node('chat_node',chat_node)
 graph.add_edge(START,'chat_node')
 graph.add_edge('chat_node',END)
 
+
 chatbot = graph.compile(checkpointer=checkpointer)
 
-thread_id = 1
 
-while True:
-    Usermessage = input("Type the message here : ")
 
-    print(f"User : " , Usermessage)
+# thread_id = 1
 
-    if Usermessage.strip().lower() in ['bye','exit','quit']:
-        break
+# while True:
+#     Usermessage = input("Type the message here : ")
 
-    config = {
-        'configurable':{
-            'thread_id':thread_id
-        }
-    }
+#     print(f"User : " , Usermessage)
 
-    message = {
-        'messages':[Usermessage]
-    }
+#     if Usermessage.strip().lower() in ['bye','exit','quit']:
+#         break
 
-    result = chatbot.invoke(message,config=config)
-    print(f"Result : ",result['messages'][-1].content)
+#     config = {
+#         'configurable':{
+#             'thread_id':thread_id
+#         }
+#     }
+
+#     message = {
+#         'messages':[Usermessage]
+#     }
+
+#     result = chatbot.invoke(message,config=config)
+#     print(f"Result : ",result['messages'][-1].content)
