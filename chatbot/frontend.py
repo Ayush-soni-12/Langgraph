@@ -1,11 +1,10 @@
 import streamlit as st
-from chatbot import chatbot
-from langchain.messages import HumanMessage
 import uuid
+from langchain_core.messages import HumanMessage
+from chatbot import chatbot, get_all_thread_ids, get_thread_title
 
+st.set_page_config(page_title="GenAI Chat UI", layout="wide")
 st.title("GenAI Chat UI")
-
-
 
 # ======================================================
 # Helpers
@@ -22,6 +21,7 @@ def get_config(thread_id):
     }
 
 def load_messages_from_langgraph(thread_id):
+    """Fetch current state messages from DB"""
     state = chatbot.get_state(config=get_config(thread_id))
     messages = state.values.get("messages", [])
 
@@ -34,7 +34,6 @@ def load_messages_from_langgraph(thread_id):
         })
     return ui_messages
 
-
 # ======================================================
 # Session State Init
 # ======================================================
@@ -42,93 +41,84 @@ def load_messages_from_langgraph(thread_id):
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = generate_thread_id()
 
-if "threads" not in st.session_state:
-    # thread_id -> title
-    st.session_state.threads = {}
-
 if "is_streaming" not in st.session_state:
     st.session_state.is_streaming = False
 
-
 # ======================================================
-# Sidebar
-# ======================================================
-
-st.sidebar.title("GenAI Chat")
-
-# ---- New Chat Button ----
-if st.sidebar.button(
-    "New Chat",
-    key="new_chat_btn",
-    disabled=st.session_state.is_streaming
-):
-    # Only create a new chat if current one has messages
-    current_msgs = load_messages_from_langgraph(st.session_state.thread_id)
-    if current_msgs:
-        st.session_state.thread_id = generate_thread_id()
-
-st.sidebar.subheader("Chats")
-
-# ---- Chat List ----
-for tid, title in reversed(st.session_state.threads.items()):
-    if st.sidebar.button(
-        title,
-        key=f"chat_btn_{tid}",
-        disabled=st.session_state.is_streaming
-    ):
-        st.session_state.thread_id = tid
-
-
-# ======================================================
-# Render Messages (ALWAYS from LangGraph)
+# Sidebar - Database Integration
 # ======================================================
 
+st.sidebar.title("History")
+
+# 1. New Chat Button
+if st.sidebar.button("➕ New Chat", use_container_width=True):
+    st.session_state.thread_id = generate_thread_id()
+    st.rerun()
+
+st.sidebar.markdown("---")
+
+# 2. Fetch all threads from Postgres
+db_threads = get_all_thread_ids()
+
+# 3. Display Threads
+# We reverse them roughly to show newest (based on ID extraction) or just list them.
+# Note: In a real prod app, you'd sort by 'updated_at' timestamp.
+if not db_threads:
+    st.sidebar.info("No history found.")
+else:
+    for tid in db_threads[::-1]:
+        # Get title dynamically from the DB history
+        title = get_thread_title(tid)
+        
+        # Highlight current chat
+        if tid == st.session_state.thread_id:
+            if st.sidebar.button(f"🔵 {title}", key=tid, use_container_width=True):
+                st.session_state.thread_id = tid
+                st.rerun()
+        else:
+            if st.sidebar.button(f"{title}", key=tid, use_container_width=True):
+                st.session_state.thread_id = tid
+                st.rerun()
+
+# ======================================================
+# Main Chat Logic
+# ======================================================
+
+# Load history for the CURRENT thread_id
 messages = load_messages_from_langgraph(st.session_state.thread_id)
 
+# Render Messages
 for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-
-# ======================================================
 # Chat Input
-# ======================================================
-
-user_input = st.chat_input(
-    "Ask something...",
-    disabled=st.session_state.is_streaming
-)
-
-# 🚨 HARD GUARD (THIS FIXES YOUR ISSUE)
-if st.session_state.is_streaming:
-    st.stop()
+user_input = st.chat_input("Ask something...", disabled=st.session_state.is_streaming)
 
 if user_input:
     st.session_state.is_streaming = True
-
-    # Register chat title on FIRST user message
-    if st.session_state.thread_id not in st.session_state.threads:
-        st.session_state.threads[
-            st.session_state.thread_id
-        ] = user_input[:20]
-
+    
     # Show user message instantly
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    # Stream Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         with st.spinner("Thinking..."):
+            # Stream events from LangGraph
+            # stream_mode="messages" yields (chunk, metadata)
             result = chatbot.stream(
-                {"messages": [user_input]},
+                {"messages": [HumanMessage(content=user_input)]},
                 config=get_config(st.session_state.thread_id),
                 stream_mode="messages"
             )
 
-            for chunk, _ in result:
-                if chunk.content:
+            for chunk, metadata in result:
+                # Depending on the graph structure, the chunk might be an AIMessageChunk
+                if hasattr(chunk, 'content') and chunk.content:
                     full_response += chunk.content
                     placeholder.markdown(full_response)
 
