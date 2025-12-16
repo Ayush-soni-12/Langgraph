@@ -1,6 +1,6 @@
 import streamlit as st
 import uuid
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage,AIMessage
 from chatbot import chatbot, get_all_thread_ids, get_thread_title
 
 st.set_page_config(page_title="GenAI Chat UI", layout="wide")
@@ -17,7 +17,11 @@ def get_config(thread_id):
     return {
         "configurable": {
             "thread_id": thread_id
-        }
+        },
+        "metadata":{
+            "thread_id":thread_id
+        },
+        "run_name":"chat_turn",
     }
 
 def load_messages_from_langgraph(thread_id):
@@ -118,9 +122,10 @@ if user_input:
 
             for chunk, metadata in result:
                 # Depending on the graph structure, the chunk might be an AIMessageChunk
-                if hasattr(chunk, 'content') and chunk.content:
-                    full_response += chunk.content
-                    placeholder.markdown(full_response)
+                if isinstance(chunk,AIMessage):
+                    if hasattr(chunk, 'content') and chunk.content:
+                        full_response += chunk.content
+                        placeholder.markdown(full_response)
 
     st.session_state.is_streaming = False
     st.rerun()
