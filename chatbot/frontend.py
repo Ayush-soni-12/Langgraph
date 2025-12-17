@@ -1,131 +1,117 @@
 import streamlit as st
-import uuid
-from langchain_core.messages import HumanMessage,AIMessage
-from chatbot import chatbot, get_all_thread_ids, get_thread_title
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+# Import from our logic file
+from chatbot import (
+    chatbot, 
+    get_config, 
+    generate_thread_id, 
+    load_messages_from_langgraph, 
+    get_all_thread_ids, 
+    get_thread_title, 
+    format_msg
+)
 
 st.set_page_config(page_title="GenAI Chat UI", layout="wide")
-st.title("GenAI Chat UI")
 
 # ======================================================
-# Helpers
-# ======================================================
-
-def generate_thread_id():
-    return str(uuid.uuid4())
-
-def get_config(thread_id):
-    return {
-        "configurable": {
-            "thread_id": thread_id
-        },
-        "metadata":{
-            "thread_id":thread_id
-        },
-        "run_name":"chat_turn",
-    }
-
-def load_messages_from_langgraph(thread_id):
-    """Fetch current state messages from DB"""
-    state = chatbot.get_state(config=get_config(thread_id))
-    messages = state.values.get("messages", [])
-
-    ui_messages = []
-    for m in messages:
-        role = "user" if isinstance(m, HumanMessage) else "assistant"
-        ui_messages.append({
-            "role": role,
-            "content": m.content
-        })
-    return ui_messages
-
-# ======================================================
-# Session State Init
+# 1. Session State Initialization
 # ======================================================
 
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = generate_thread_id()
+    # Initial Load
+    st.session_state.messages = load_messages_from_langgraph(st.session_state.thread_id)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 if "is_streaming" not in st.session_state:
     st.session_state.is_streaming = False
 
 # ======================================================
-# Sidebar - Database Integration
+# 2. Sidebar (History Management)
 # ======================================================
 
-st.sidebar.title("History")
+st.sidebar.title("GenAI History")
 
-# 1. New Chat Button
 if st.sidebar.button("➕ New Chat", use_container_width=True):
     st.session_state.thread_id = generate_thread_id()
+    st.session_state.messages = [] 
     st.rerun()
 
 st.sidebar.markdown("---")
 
-# 2. Fetch all threads from Postgres
 db_threads = get_all_thread_ids()
 
-# 3. Display Threads
-# We reverse them roughly to show newest (based on ID extraction) or just list them.
-# Note: In a real prod app, you'd sort by 'updated_at' timestamp.
-if not db_threads:
-    st.sidebar.info("No history found.")
-else:
+if db_threads:
+    # Show newest first
     for tid in db_threads[::-1]:
-        # Get title dynamically from the DB history
         title = get_thread_title(tid)
+        is_active = (tid == st.session_state.thread_id)
         
-        # Highlight current chat
-        if tid == st.session_state.thread_id:
-            if st.sidebar.button(f"🔵 {title}", key=tid, use_container_width=True):
+        label = f"🔵 {title}" if is_active else f"{title}"
+        
+        if st.sidebar.button(label, key=tid, use_container_width=True):
+            if st.session_state.thread_id != tid:
                 st.session_state.thread_id = tid
-                st.rerun()
-        else:
-            if st.sidebar.button(f"{title}", key=tid, use_container_width=True):
-                st.session_state.thread_id = tid
+                # OPTIMIZATION: Only fetch from DB when switching threads
+                st.session_state.messages = load_messages_from_langgraph(tid)
                 st.rerun()
 
 # ======================================================
-# Main Chat Logic
+# 3. Main Chat Interface
 # ======================================================
 
-# Load history for the CURRENT thread_id
-messages = load_messages_from_langgraph(st.session_state.thread_id)
+st.title("GenAI Assistant")
 
-# Render Messages
-for msg in messages:
+# A. Render Chat from Local Session State (Fast!)
+for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Chat Input
+# B. Input Handler
 user_input = st.chat_input("Ask something...", disabled=st.session_state.is_streaming)
 
 if user_input:
     st.session_state.is_streaming = True
     
-    # Show user message instantly
+    # 1. Display User Message & Save to Local State
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Stream Response
+    # 2. Stream Assistant Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         with st.spinner("Thinking..."):
-            # Stream events from LangGraph
-            # stream_mode="messages" yields (chunk, metadata)
             result = chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=get_config(st.session_state.thread_id),
                 stream_mode="messages"
             )
-
+            
             for chunk, metadata in result:
-                # Depending on the graph structure, the chunk might be an AIMessageChunk
-                if isinstance(chunk,AIMessage):
-                    if hasattr(chunk, 'content') and chunk.content:
-                        full_response += chunk.content
+                # Filter out raw Tool outputs
+                if isinstance(chunk, ToolMessage):
+                    continue
+                
+                # Process AI text
+                if isinstance(chunk, AIMessage):
+                    if chunk.tool_calls and not chunk.content:
+                        continue
+                        
+                    # Use helper from chatbot.py to clean text
+                    chunk_text = format_msg(chunk.content)
+                    full_response += chunk_text
+                    
+                    if full_response:
                         placeholder.markdown(full_response)
+        
+        # 3. Save Final Response to Local State
+        if full_response:
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
 
     st.session_state.is_streaming = False
-    st.rerun()
