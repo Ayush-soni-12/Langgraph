@@ -59,6 +59,9 @@ llm_with_tools = llm.bind_tools(tools)
 class MessageState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
+
+
+
 def chat_node(state: MessageState) -> MessageState:
     response = llm_with_tools.invoke(state["messages"])
     return {"messages": [response]}

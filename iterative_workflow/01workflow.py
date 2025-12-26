@@ -249,7 +249,7 @@ Based on the feedback, apply **ONE PRIMARY TECHNIQUE**:
     return{'tweet':response ,'iteration':iteration}
 
 def check_condition(state:postState):
-    if state['evaulation']=='approved' or state['max_iteration'] >= state['iteration']:
+    if state['evaulation']=='approved' and state['max_iteration'] >= state['iteration']:
         return END
     else :
         return 'optimize_tweet'
@@ -273,7 +273,9 @@ graph.add_edge('optimize_tweet','evaulate_tweet')
 workflow = graph.compile()
 
 initial_state = {
-    'topic':"Indian Railways"
+    'topic':"Inter-Services Intelligence responsible for many terrorist attack in India ",
+    "iteration":1,
+    "max_iteration":5
 }
 
 result = workflow.invoke(initial_state)
