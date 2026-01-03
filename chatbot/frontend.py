@@ -72,6 +72,11 @@ for msg in st.session_state.messages:
 
 # B. Input Handler
 user_input = st.chat_input("Ask something...", disabled=st.session_state.is_streaming)
+# ======================================================
+# 3. Main Chat Interface (Updated Section B)
+# ======================================================
+
+# ... (Previous code remains the same)
 
 if user_input:
     st.session_state.is_streaming = True
@@ -85,8 +90,9 @@ if user_input:
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
-
-        with st.spinner("Thinking..."):
+        
+        # Initialize the status container
+        with st.status("Thinking...", expanded=True) as status:
             result = chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=get_config(st.session_state.thread_id),
@@ -94,16 +100,29 @@ if user_input:
             )
             
             for chunk, metadata in result:
-                # Filter out raw Tool outputs
+                # A. Handle Tool Calls (When the LLM decides to use a tool)
+                if isinstance(chunk, AIMessage) and chunk.tool_calls:
+                    for tool_call in chunk.tool_calls:
+                        tool_name = tool_call["name"]
+                        status.write(f"Calling tool: **{tool_name}**...")
+                        status.update(label=f"Running {tool_name}...", state="running")
+                
+                # B. Handle Tool Results (When the tool finishes)
                 if isinstance(chunk, ToolMessage):
+                    status.write(f"✅ Tool **{chunk.name}** completed.")
+                    # Keep status visible but update the label
+                    status.update(label="Processing results...", state="running")
                     continue
                 
-                # Process AI text
+                # C. Process AI Text Response
                 if isinstance(chunk, AIMessage):
+                    # Skip if it's just a tool call notification without content
                     if chunk.tool_calls and not chunk.content:
                         continue
                         
-                    # Use helper from chatbot.py to clean text
+                    # Once we get actual text, we can mark the status as complete
+                    status.update(label="Assistant response generated", state="complete", expanded=False)
+                    
                     chunk_text = format_msg(chunk.content)
                     full_response += chunk_text
                     
@@ -115,3 +134,4 @@ if user_input:
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
     st.session_state.is_streaming = False
+    st.rerun()

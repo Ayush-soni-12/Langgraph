@@ -6,7 +6,7 @@ from psycopg_pool import ConnectionPool
 load_dotenv()
 
 # Database Configuration
-DB_URI = "postgresql://Ayush:Ayush%40123@localhost:5432/langgraph"
+DB_URI = "postgresql://Ayush:Ayush123@localhost:5432/langgraph"
 STOCK_API_KEY = os.getenv("STOCK_API")
 
 # Create a persistent connection pool
