@@ -1,3 +1,4 @@
+from itertools import count
 import requests
 from typing import Annotated, TypedDict, List
 import uuid
@@ -11,9 +12,21 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
+from langchain_core.messages.utils import trim_messages,count_tokens_approximately
+from langchain_core.messages import SystemMessage
 
 # Local Imports
 from init_db import pool, STOCK_API_KEY
+
+
+# ======================================================
+# Rag implementation
+# ======================================================
+
+
+
+
+
 
 # ======================================================
 # 1. Tool Definitions
@@ -58,25 +71,79 @@ llm_with_tools = llm.bind_tools(tools)
 
 class MessageState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    summary:str
 
 
+MAX_TOKEN=1000
+
+
+def summarize_messages(state: MessageState):
+    summary = state.get("summary", "")
+    messages = state["messages"]
+    
+    # Only summarize if we have more than, say, 10 messages
+    if len(messages) > 10:
+        # We summarize everything EXCEPT the last 5 messages 
+        # (to keep the current conversation flow perfectly clear)
+        to_summarize = messages[:-5]
+        
+        summary_prompt = (
+            f"Extend the current summary by incorporating the new messages below: {summary}\n\n"
+            f"New messages to summarize: {to_summarize}"
+        )
+        
+        # Call LLM to create the summary
+        response = llm.invoke([HumanMessage(content=summary_prompt)])
+        print(f"Response summary",response.content)
+        
+        # We return the NEW summary. 
+        # IMPORTANT: We do NOT delete messages here so they stay in UI.
+        return {"summary": response.content}
+    
+    return {"summary": summary}
 
 
 def chat_node(state: MessageState) -> MessageState:
-    response = llm_with_tools.invoke(state["messages"])
+    summary = state.get("summary", "")
+    
+    # VIRTUAL TRIM: Only grab the most recent messages for the LLM
+    # This does NOT delete them from Postgres/State.
+    recent_messages = trim_messages(
+        state['messages'],
+        strategy="last",
+        token_counter=count_tokens_approximately,
+        max_tokens=1000, 
+        start_on="human",
+        include_system=True
+    )
+
+    # Combine Summary (as a System Message) + Recent Messages
+    inputs = []
+    if summary:
+        inputs.append(SystemMessage(content=f"Summary of previous conversation: {summary}"))
+    
+    inputs.extend(recent_messages)
+
+    response = llm_with_tools.invoke(inputs)
     return {"messages": [response]}
 
 tool_node = ToolNode(tools)
 
 builder = StateGraph(MessageState)
+builder.add_node("summarize", summarize_messages) # New Node
 builder.add_node("chat_node", chat_node)
 builder.add_node("tools", tool_node)
-builder.add_edge(START, "chat_node")
+
+builder.add_edge(START, "summarize") # Summarize first
+builder.add_edge("summarize", "chat_node") # Then chat
 builder.add_conditional_edges("chat_node", tools_condition)
 builder.add_edge("tools", "chat_node")
 builder.add_edge("chat_node", END)
 
 checkpointer = PostgresSaver(pool)
+
+checkpointer.setup()
+
 chatbot = builder.compile(checkpointer=checkpointer)
 
 # ======================================================
@@ -103,8 +170,9 @@ def format_msg(content):
         for item in content:
             if isinstance(item, str):
                 text_parts.append(item)
-            elif isinstance(item, dict) and "text" in item:
-                text_parts.append(item["text"])
+            elif isinstance(item, dict):
+                if "text" in item:
+                    text_parts.append(item["text"])
         return "".join(text_parts)
     return ""
 
@@ -113,8 +181,11 @@ def load_messages_from_langgraph(thread_id):
     Fetch history from DB, but CLEAN it before returning.
     Removes ToolMessages and formats messy text.
     """
-    state = chatbot.get_state(config=get_config(thread_id))
-    messages = state.values.get("messages", [])
+    if thread_id:
+        state = chatbot.get_state(config=get_config(thread_id)) 
+    # print("State",state)
+    if state:
+        messages = state.values.get("messages", []) if state.values else []
 
     ui_messages = []
     for m in messages:

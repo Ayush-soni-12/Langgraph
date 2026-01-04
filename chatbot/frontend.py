@@ -14,6 +14,8 @@ from chatbot import (
 
 st.set_page_config(page_title="GenAI Chat UI", layout="wide")
 
+
+
 # ======================================================
 # 1. Session State Initialization
 # ======================================================
@@ -98,6 +100,7 @@ if user_input:
                 config=get_config(st.session_state.thread_id),
                 stream_mode="messages"
             )
+            # print(f"Result",result)
             
             for chunk, metadata in result:
                 # A. Handle Tool Calls (When the LLM decides to use a tool)
