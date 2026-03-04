@@ -1,9 +1,8 @@
 from itertools import count
 import requests
-from typing import Annotated, TypedDict, List
+from typing import Annotated, TypedDict
 import uuid
 
-# LangChain Imports
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
@@ -12,21 +11,12 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
-from langchain_core.messages.utils import trim_messages,count_tokens_approximately
+from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.messages import SystemMessage
+from langchain_core.runnables import RunnableConfig
 
-# Local Imports
-from init_db import pool, STOCK_API_KEY
-
-
-# ======================================================
-# Rag implementation
-# ======================================================
-
-
-
-
-
+# FIX 1: Import store
+from init_db import pool, STOCK_API_KEY, store
 
 # ======================================================
 # 1. Tool Definitions
@@ -56,7 +46,34 @@ def get_stock_price(symbol: str) -> dict:
     r = requests.get(url)
     return r.json()
 
-tools = [search_tool, get_stock_price, calculator]
+
+def make_memory_tools(user_id: str):
+    @tool
+    def save_memory(key: str, value: str) -> str:
+        """Save an important fact about the user for future conversations."""
+        store.put(
+            ("user_memory", user_id),
+            key,
+            {"data": value}
+        )
+        return f"Saved: {key} = {value}"
+
+    @tool
+    def get_memory(key: str = None) -> str:
+        """Retrieve facts about the user from long-term memory."""
+        if key:
+            result = store.get(("user_memory", user_id), key)
+            return f"{key}: {result.value['data']}" if result else f"No memory for: {key}"
+        results = store.search(("user_memory", user_id))
+        if not results:
+            return "No memories found."
+        return "\n".join([f"{r.key}: {r.value['data']}" for r in results])
+
+    return [save_memory, get_memory]
+
+
+# FIX 2: Only static tools here — memory tools are added dynamically
+static_tools = [search_tool, get_stock_price, calculator]
 
 # ======================================================
 # 2. Model & Graph Setup
@@ -64,84 +81,93 @@ tools = [search_tool, get_stock_price, calculator]
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
-    max_output_tokens=500,  # <--- SET LIMIT HERE (e.g., 500 words/tokens)
-    temperature=0.7         # Optional: Controls creativity (0.0 = Precise, 1.0 = Creative)
+    max_output_tokens=500,
+    temperature=0.7
 )
-llm_with_tools = llm.bind_tools(tools)
 
 class MessageState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    summary:str
-
-
-MAX_TOKEN=1000
+    summary: str
 
 
 def summarize_messages(state: MessageState):
     summary = state.get("summary", "")
     messages = state["messages"]
-    
-    # Only summarize if we have more than, say, 10 messages
+
     if len(messages) > 10:
-        # We summarize everything EXCEPT the last 5 messages 
-        # (to keep the current conversation flow perfectly clear)
         to_summarize = messages[:-5]
-        
         summary_prompt = (
             f"Extend the current summary by incorporating the new messages below: {summary}\n\n"
             f"New messages to summarize: {to_summarize}"
         )
-        
-        # Call LLM to create the summary
         response = llm.invoke([HumanMessage(content=summary_prompt)])
-        print(f"Response summary",response.content)
-        
-        # We return the NEW summary. 
-        # IMPORTANT: We do NOT delete messages here so they stay in UI.
+        print("Response summary", response.content)
         return {"summary": response.content}
-    
+
     return {"summary": summary}
 
 
-def chat_node(state: MessageState) -> MessageState:
+def chat_node(state: MessageState, config: RunnableConfig) -> MessageState:
     summary = state.get("summary", "")
-    
-    # VIRTUAL TRIM: Only grab the most recent messages for the LLM
-    # This does NOT delete them from Postgres/State.
+
+    user_id = config["configurable"].get("user_id", "default_user")
+
+    # FIX 3: Build all tools dynamically with correct user_id
+    memory_tools = make_memory_tools(user_id)
+    all_tools = static_tools + memory_tools
+
+    # FIX 4: Bind the complete tool list — including memory tools
+    llm_with_tools = llm.bind_tools(all_tools)
+
+    # Load long-term memories
+
+    memories = store.search(("user_memory", user_id)) 
+    memory_text = ""
+    if memories:
+        facts = "\n".join([f"- {m.key}: {m.value['data']}" for m in memories])
+        memory_text = f"\nWhat you know about this user:\n{facts}"
+
     recent_messages = trim_messages(
         state['messages'],
         strategy="last",
         token_counter=count_tokens_approximately,
-        max_tokens=1000, 
+        max_tokens=1000,
         start_on="human",
         include_system=True
     )
 
-    # Combine Summary (as a System Message) + Recent Messages
-    inputs = []
-    if summary:
-        inputs.append(SystemMessage(content=f"Summary of previous conversation: {summary}"))
-    
+    inputs = [
+        SystemMessage(content=(
+            f"You are a helpful assistant.{memory_text}"
+            + (f"\n\nSummary of recent conversation: {summary}" if summary else "")
+        ))
+    ]
     inputs.extend(recent_messages)
 
     response = llm_with_tools.invoke(inputs)
     return {"messages": [response]}
 
-tool_node = ToolNode(tools)
+
+# FIX 5: Custom tool node that also builds memory tools dynamically
+def dynamic_tool_node(state: MessageState, config: RunnableConfig):
+    user_id = config["configurable"].get("user_id", "default_user")
+    memory_tools = make_memory_tools(user_id)
+    all_tools = static_tools + memory_tools
+    return ToolNode(all_tools).invoke(state, config)  # ← Correct tools every time
+
 
 builder = StateGraph(MessageState)
-builder.add_node("summarize", summarize_messages) # New Node
+builder.add_node("summarize", summarize_messages)
 builder.add_node("chat_node", chat_node)
-builder.add_node("tools", tool_node)
+builder.add_node("tools", dynamic_tool_node)  # ← Use dynamic node
 
-builder.add_edge(START, "summarize") # Summarize first
-builder.add_edge("summarize", "chat_node") # Then chat
+builder.add_edge(START, "summarize")
+builder.add_edge("summarize", "chat_node")
 builder.add_conditional_edges("chat_node", tools_condition)
 builder.add_edge("tools", "chat_node")
 builder.add_edge("chat_node", END)
 
 checkpointer = PostgresSaver(pool)
-
 checkpointer.setup()
 
 chatbot = builder.compile(checkpointer=checkpointer)
@@ -153,71 +179,51 @@ chatbot = builder.compile(checkpointer=checkpointer)
 def generate_thread_id():
     return str(uuid.uuid4())
 
-def get_config(thread_id):
-    return {"configurable": {"thread_id": thread_id}}
+# FIX 6: No st import needed — accept user_id as a parameter
+def get_config(thread_id: str, user_id: str = "default_user"):
+    return {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 
 def format_msg(content):
-    """
-    CLEANER FUNCTION:
-    - Handles standard strings.
-    - Handles Gemini's list of dicts [{'type': 'text', 'text': ...}].
-    """
     if isinstance(content, str):
         return content
     elif isinstance(content, list):
-        # Extract text from the messy list
         text_parts = []
         for item in content:
             if isinstance(item, str):
                 text_parts.append(item)
-            elif isinstance(item, dict):
-                if "text" in item:
-                    text_parts.append(item["text"])
+            elif isinstance(item, dict) and "text" in item:
+                text_parts.append(item["text"])
         return "".join(text_parts)
     return ""
 
-def load_messages_from_langgraph(thread_id):
-    """
-    Fetch history from DB, but CLEAN it before returning.
-    Removes ToolMessages and formats messy text.
-    """
+def load_messages_from_langgraph(thread_id, user_id="default_user"):
     if thread_id:
-        state = chatbot.get_state(config=get_config(thread_id)) 
-    # print("State",state)
+        state = chatbot.get_state(config=get_config(thread_id, user_id))
     if state:
         messages = state.values.get("messages", []) if state.values else []
 
     ui_messages = []
     for m in messages:
-        # 1. Skip technical ToolMessages
         if isinstance(m, ToolMessage):
             continue
-        
-        # 2. Skip empty tool calls
         if isinstance(m, AIMessage) and m.tool_calls and not m.content:
             continue
-
         role = "user" if isinstance(m, HumanMessage) else "assistant"
-        
-        # 3. Clean the content
         clean_content = format_msg(m.content)
-        
         if clean_content:
             ui_messages.append({"role": role, "content": clean_content})
-            
+
     return ui_messages
 
 def get_all_thread_ids():
-    """List all threads from Postgres."""
     config_list = checkpointer.list(None)
     thread_ids = set()
     for item in config_list:
         thread_ids.add(item.config["configurable"]["thread_id"])
     return list(thread_ids)
 
-def get_thread_title(thread_id):
-    """Get a simple title based on the first user message."""
-    state = chatbot.get_state(config=get_config(thread_id))
+def get_thread_title(thread_id, user_id="default_user"):
+    state = chatbot.get_state(config=get_config(thread_id, user_id))
     messages = state.values.get("messages", [])
     for m in messages:
         if isinstance(m, HumanMessage):

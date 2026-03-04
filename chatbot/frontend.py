@@ -20,16 +20,22 @@ st.set_page_config(page_title="GenAI Chat UI", layout="wide")
 # 1. Session State Initialization
 # ======================================================
 
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "ayush" 
+
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = generate_thread_id()
     # Initial Load
-    st.session_state.messages = load_messages_from_langgraph(st.session_state.thread_id)
+    st.session_state.messages = load_messages_from_langgraph(st.session_state.thread_id, st.session_state.user_id)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "is_streaming" not in st.session_state:
     st.session_state.is_streaming = False
+
+
+
 
 # ======================================================
 # 2. Sidebar (History Management)
@@ -58,7 +64,7 @@ if db_threads:
             if st.session_state.thread_id != tid:
                 st.session_state.thread_id = tid
                 # OPTIMIZATION: Only fetch from DB when switching threads
-                st.session_state.messages = load_messages_from_langgraph(tid)
+                st.session_state.messages = load_messages_from_langgraph(tid, st.session_state.user_id)
                 st.rerun()
 
 # ======================================================
@@ -97,7 +103,7 @@ if user_input:
         with st.status("Thinking...", expanded=True) as status:
             result = chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
-                config=get_config(st.session_state.thread_id),
+                config=get_config(st.session_state.thread_id, st.session_state.user_id),
                 stream_mode="messages"
             )
             # print(f"Result",result)
